@@ -6,7 +6,7 @@
 /// <reference path="Contract.class.ts" />
 
 /** @ignore */
-declare var require: any;
+//declare var require: any;
 
 /** @ignore */
 declare var exports: any;
@@ -15,14 +15,14 @@ declare var exports: any;
 declare var __dirname: any;
 
 /** @ignore */
-declare var Proxy: any;
+//declare var Proxy: any;
 
 var fs = require('fs');
 
 //var EProxy = require('./EurecaProxy.class.js').Eureca.EurecaProxy;
 //var io = require('engine.io');
 var util = require('util');
-
+var http = require('http');
 
 var host = '';
 function getUrl(req) {
@@ -92,21 +92,10 @@ module Eureca  {
 
         private transport: any;
         public stub: Stub;
-        private scriptCache: string = '';
+        public scriptCache: string = '';
 
-        private serialize = JSON.stringify;
-        private deserialize = function (message) {
-            var jobj;
-            if (typeof message != 'object') {
-                try {
-                    jobj = JSON.parse(message);
-                } catch (ex) { };
-            }
-            else {
-                jobj = message;
-            }
-            return jobj;
-        }
+        private serialize = (v) => v;
+        private deserialize = (v) => v;
 
 
         private useAuthentication:boolean;
@@ -133,24 +122,25 @@ module Eureca  {
         constructor(public settings: any = {}) {
             super();
             
-            if (typeof settings.serialize == 'function')
-                this.serialize = settings.serialize;
-            else
-                settings.serialize = this.serialize;
+            //needed by primus
+            settings.transformer = settings.transport || 'engine.io';
+            this.transport = Transport.get(settings.transformer);
+            
+            
+            if (typeof settings.serialize == 'function' || typeof this.transport.serialize == 'function')
+                this.serialize = settings.serialize || this.transport.serialize;
 
-            if (typeof settings.deserialize == 'function')
-                this.deserialize = settings.deserialize;
-            else
-                settings.deserialize = this.deserialize;
+            settings.serialize = this.serialize;
 
+            if (typeof settings.deserialize == 'function'|| typeof this.transport.deserialize == 'function')
+                this.deserialize = settings.deserialize || this.transport.deserialize
+            
+            settings.deserialize = this.deserialize;
             
 
 
             this.stub = new Stub(settings);
-            
-            settings.transformer = settings.transport || 'engine.io';
-            this.transport = Transport.get(settings.transformer);
-            
+                       
 
 
             this.contract = [];
@@ -264,8 +254,12 @@ module Eureca  {
 
             
             this.scriptCache = '';
-            if (this.transport.script && this.transport.script != '')
-                this.scriptCache += fs.readFileSync(__dirname + this.transport.script);
+            if (this.transport.script){
+                if (this.transport.script.length < 256 && fs.existsSync(__dirname + this.transport.script))
+                    this.scriptCache += fs.readFileSync(__dirname + this.transport.script);
+                else
+                    this.scriptCache += this.transport.script;
+            }
             this.scriptCache += '\nvar _eureca_prefix = "' + prefix + '";\n';
             this.scriptCache += '\nvar _eureca_uri = "' + getUrl(request) + '";\n';
             this.scriptCache += '\nvar _eureca_host = "' + getUrl(request) + '";\n';
@@ -293,7 +287,7 @@ module Eureca  {
 
                 var sendObj = {};
                 sendObj[Eureca.Protocol.contractId] = this.contract;
-                socket.send(JSON.stringify(sendObj));
+                socket.send(this.serialize(sendObj));
             }
         }
 
@@ -303,42 +297,42 @@ module Eureca  {
             retObj[Eureca.Protocol.signatureId] = this['retId'];
             retObj[Eureca.Protocol.resultId] = result;
             retObj[Eureca.Protocol.errorId] = error;
-            this['connection'].send(JSON.stringify(retObj));
+            this['connection'].send(this['serialize'](retObj));
         }
 
         private _handleServer(ioServer:IServer)
         {
-            var _this = this;
+            var __this = this;
 
             //ioServer.on('connection', function (socket) {
-            ioServer.onconnect(function (socket) {
+            ioServer.onconnect(function (eurecaClientSocket) {
                 
                 //socket.siggg = 'A';
                 
-                socket.eureca.remoteAddress = (<any>socket).remoteAddress;
+                eurecaClientSocket.eureca.remoteAddress = (<any>eurecaClientSocket).remoteAddress;
 
-                _this.clients[socket.id] = socket;
+                __this.clients[eurecaClientSocket.id] = eurecaClientSocket;
 
                 //Send EURECA contract
 
                 var sendContract = function () {
 
-                    _this.contract = Contract.ensureContract(_this.exports, _this.contract);
+                    __this.contract = Contract.ensureContract(__this.exports, __this.contract);
                     var sendObj = {};
-                    sendObj[Eureca.Protocol.contractId] = _this.contract;
+                    sendObj[Eureca.Protocol.contractId] = __this.contract;
 
-                    if (_this.allowedF == 'all')
-                        sendObj[Eureca.Protocol.signatureId] = socket.id;
+                    if (__this.allowedF == 'all')
+                        sendObj[Eureca.Protocol.signatureId] = eurecaClientSocket.id;
 
-                    socket.send(JSON.stringify(sendObj));
+                    eurecaClientSocket.send(__this.serialize(sendObj));
                 }
 
-                if (!_this.useAuthentication) sendContract();
+                if (!__this.useAuthentication) sendContract();
 
 
                 //attach socket client
-                socket.clientProxy = _this.getClient(socket.id);
-                socket._proxy = socket.clientProxy;
+                eurecaClientSocket.clientProxy = __this.getClient(eurecaClientSocket.id);
+                eurecaClientSocket._proxy = eurecaClientSocket.clientProxy;
 
 
                 /**
@@ -347,10 +341,10 @@ module Eureca  {
                 * @event Server#connect
                 * @property {ISocket} socket - client socket.
                 */
-                _this.trigger('connect', socket);
+                __this.trigger('connect', eurecaClientSocket);
 
 
-                socket.on('message', function (message) {
+                eurecaClientSocket.on('message', function (message) {
 
 
                     
@@ -362,64 +356,54 @@ module Eureca  {
                     * @property {String} message - the received message.
                     * @property {ISocket} socket - client socket.
                     */
-                    _this.trigger('message', message, socket);
+                    __this.trigger('message', message, eurecaClientSocket);
                     
 
                     var context: any;
 
-                    var jobj = _this.deserialize.call(socket, message);
-
-                    //if (typeof message != 'object') {
-                    //    try {
-                    //        jobj = JSON.parse(message);
-                    //    } catch (ex) { };
-                    //}
-                    //else {
-                    //    jobj = message;
-                    //}
-
+                    var jobj = __this.deserialize.call(eurecaClientSocket, message);
 
                     if (jobj === undefined) {
-                        _this.trigger('unhandledMessage', message, socket);
+                        __this.trigger('unhandledMessage', message, eurecaClientSocket);
                         return;
                     }
 
                     //Handle authentication
                     if (jobj[Eureca.Protocol.authReq] !== undefined) {
                         
-                        if (typeof _this.settings.authenticate == 'function')
+                        if (typeof __this.settings.authenticate == 'function')
                         {
                             var args = jobj[Eureca.Protocol.authReq];
 
                             args.push(function (error) {
                                 if (error == null) {
-                                    socket.eureca.authenticated = true;
+                                    eurecaClientSocket.eureca.authenticated = true;
                                     sendContract();
-                                    //Todo : trigger authenticated event
                                 }
 
                                 var authResponse = {};
                                 authResponse[Eureca.Protocol.authResp] = [error];
-                                socket.send(authResponse);
+                                eurecaClientSocket.send(__this.serialize(authResponse));
 
-                                _this.trigger('authentication', error);
+                                __this.trigger('authentication', error);
                             });
 
                             var context:any = {
-                                user: { clientId: socket.id },
-                                connection: socket,
-                                socket: socket,
+                                user: { clientId: eurecaClientSocket.id },
+                                connection: eurecaClientSocket,
+                                socket: eurecaClientSocket,
+                                request:eurecaClientSocket.request
                             };
 
-                            _this.settings.authenticate.apply(context, args);
+                            __this.settings.authenticate.apply(context, args);
 
                         }
                         return;
                     }
 
 
-                    if (_this.useAuthentication && !socket.eureca.authenticated) {
-                        console.log('Authentication needed for ', socket.id);
+                    if (__this.useAuthentication && !eurecaClientSocket.eureca.authenticated) {
+                        console.log('Authentication needed for ', eurecaClientSocket.id);
                         return;
                     }
 
@@ -434,45 +418,21 @@ module Eureca  {
 
                     //handle remote call
                     if (jobj[Eureca.Protocol.functionId] !== undefined) {
-        //                if (socket.context == undefined) {
-        //                    var returnFunc = function (result, error=null) {
-        //                        var retObj = {};
-        //                        retObj[Eureca.Protocol.signatureId] = this.retId;
-        //                        retObj[Eureca.Protocol.resultId] = result;
-								//retObj[Eureca.Protocol.errorId] = error;
-        //                        this.connection.send(JSON.stringify(retObj));
-        //                    }
-
-        //                    socket.context = { user: { clientId: socket.id }, connection: socket, socket: socket, clientProxy:socket.clientProxy, async: false, retId: jobj[Eureca.Protocol.signatureId], 'return': returnFunc };
-
-        //                }
-        //                socket.context.retId = jobj[Eureca.Protocol.signatureId];
-        //                _this.stub.invoke(socket.context, _this, jobj, socket);
 
                             var context:any = {
-                                user: { clientId: socket.id },
-                                connection: socket,
-                                socket: socket,
-                                clientProxy: socket.clientProxy,
+                                user: { clientId: eurecaClientSocket.id },
+                                connection: eurecaClientSocket,
+                                socket: eurecaClientSocket,
+                                serialize:__this.serialize,
+                                clientProxy: eurecaClientSocket.clientProxy,
                                 async: false,
                                 retId: jobj[Eureca.Protocol.signatureId],
                                 return: Server.returnFunc
                             };
 
                         
-                        //context.retId = jobj[Eureca.Protocol.signatureId];
 
-
-                        //if (!_this.settings.preInvoke || jobj[Eureca.Protocol.functionId] == 'authenticate' || (typeof _this.settings.preInvoke == 'function' && _this.settings.preInvoke.apply(context)))
-                        
-
-                        //Experimental custom context sharing
-                        //remote context is shared throught serverProxy or proxy function in the client side
-                        //if (jobj[Eureca.Protocol.context]) {
-                        //    socket.remoteContext = jobj[Eureca.Protocol.context];
-                        //}
-
-                        _this.stub.invoke(context, _this, jobj, socket);
+                        __this.stub.invoke(context, __this, jobj, eurecaClientSocket);
 
 
                         return;
@@ -487,10 +447,10 @@ module Eureca  {
                     }
 
 
-                    _this.trigger('unhandledMessage', message, socket);
+                    __this.trigger('unhandledMessage', message, eurecaClientSocket);
                 });
 
-                socket.on('error', function (e) {
+                eurecaClientSocket.on('error', function (e) {
 
 
                     /**
@@ -500,40 +460,31 @@ module Eureca  {
                     * @property {String} error - the error message
                     * @property {ISocket} socket - client socket.
                     */
-                    _this.trigger('error', e, socket);
+                    __this.trigger('error', e, eurecaClientSocket);
                 });
 
 
-                socket.on('close', function () {
+                eurecaClientSocket.on('close', function () {
 
                     /**
                     * triggered when the client is disconneced.
                     *
                     * @event Server#disconnect
                     * @property {ISocket} socket - client socket.
-                    */
-                    //console.log('disconnected deletting ', _this.clients);
-                    _this.trigger('disconnect', socket);
-                    delete _this.clients[socket.id];
-
-                    //console.log('disconnected ', _this.clients);
-                    //console.log('i', '#of clients changed ', EURECA.clients.length, );
+                    */                    
+                    __this.trigger('disconnect', eurecaClientSocket);
+                    delete __this.clients[eurecaClientSocket.id];
 
                 });
 
+
+                eurecaClientSocket.on('stateChange', function (s) {
+
+                    __this.trigger('stateChange', s);
+                });                
             });
 
         }
-
-        //Removing need for Harmony proxies for simplification
-        //private _checkHarmonyProxies()
-        //{
-        //    if (typeof Proxy == 'undefined' && !hproxywarn) {
-        //        ELog.log('I', 'Harmony proxy not found', 'using workaround');
-        //        ELog.log('I', 'to avoid this message please use : node --harmony-proxies <app>', '');
-        //        hproxywarn = true;
-        //    }
-        //}
 
 
         /**
@@ -542,15 +493,47 @@ module Eureca  {
          * 
          * @function attach
          * @memberof Server#
-         * @param {Server} - a nodejs {@link https://nodejs.org/api/http.html#http_class_http_server|nodejs http server}
+         * @param {appServer} - a nodejs {@link https://nodejs.org/api/http.html#http_class_http_server|nodejs http server}
          *  or {@link http://expressjs.com/api.html#application|expressjs Application}
          * 
          */
-        public attach (server:any) {
+        public attach (appServer:any) {
+            var __this = this;
+            var app = undefined;
 
-            var app = server;
-            if (server._events && server._events.request !== undefined && server.routes === undefined && server._events.request.on) app = server._events.request;
+
+
+            //is it express application ?
+            if (appServer._events && appServer._events.request !== undefined && appServer.routes === undefined && appServer._events.request.on)
+                app = appServer._events.request;
+                
+                
+            //is standard http server ?
+            if (app === undefined && appServer instanceof http.Server)
+                app = appServer
+
+
+
+
+            //not standard http server nor express app ==> try to guess http.Server instance
+            if (app === undefined)
+            {
+                var keys = Object.getOwnPropertyNames(appServer);            
+                for (let k of keys)
+                {
+                    if (appServer[k] instanceof http.Server)
+                    {
+                        //got it !
+                        app = appServer[k];
+                        break;
+                    }
+                }                
+            }            
+            
+            
             //this._checkHarmonyProxies();
+            appServer.eurecaServer = this;
+
 
             this.allowedF = this.settings.allow || [];
             var _prefix = this.settings.prefix || 'eureca.io';
@@ -560,12 +543,12 @@ module Eureca  {
 
             //initialising server
             //var ioServer = io.attach(server, { path: '/'+_prefix });
-            this.ioServer = this.transport.createServer(server, { prefix: _prefix, transformer:_transformer, parser:_parser });
+            this.ioServer = this.transport.createServer(appServer, { prefix: _prefix, transformer:_transformer, parser:_parser });
             //console.log('Primus ? ', ioServer.primus);
 
             //var scriptLib = (typeof ioServer.primus == 'function') ? ioServer.primus.library() : null;
 
-            var _this = this;
+            
 
             this._handleServer(this.ioServer);
 
@@ -578,7 +561,7 @@ module Eureca  {
 
                 
                 app.get(_clientUrl, function (request, response) {
-                    _this.sendScript(request, response, _prefix);
+                    __this.sendScript(request, response, _prefix);
                 });
             }
             else  //Fallback to nodejs
@@ -587,7 +570,7 @@ module Eureca  {
                 app.on('request', function (request, response) {
                     if (request.method === 'GET') {
                         if (request.url.split('?')[0] === _clientUrl) {
-                            _this.sendScript(request, response, _prefix);
+                            __this.sendScript(request, response, _prefix);
                         }
                     }
                 });
@@ -599,11 +582,11 @@ module Eureca  {
 
 
             //Workaround : nodejs 0.10.0 have a strange behaviour making remoteAddress unavailable when connecting from a nodejs client
-            server.on('request', function (request, response) {
+            appServer.on('request', function (request, response) {
                 if (!request.query) return;
 
                 var id = request.query.sid;
-                var client = _this.clients[request.query.sid];
+                var client = __this.clients[request.query.sid];
 
                 if (client) {
 
